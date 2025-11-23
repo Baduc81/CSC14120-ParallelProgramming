@@ -1,8 +1,9 @@
-#include <bits/stdc++.h>
+#include <iostream>
 #include "gpu_info.h"
-using namespace std;
+#include "config.h"
 
 int main() {
 	gpu_info::print();
+	std::cout << "Data folder: " << DATA_DIR << std::endl;
 	return 0;
 }
