@@ -22,15 +22,14 @@ cd CSC14120-ParallelProgramming
 ```
 
 ### 2. Prepare the data
-First, create a `data/` folder.
-Then install the CIFAR-10 dataset **binary version** from [here](https://www.cs.toronto.edu/~kriz/cifar.html) and place it inside the `data/` directory. Then extract it.
+Install the CIFAR-10 dataset **binary version** from [here](https://www.cs.toronto.edu/~kriz/cifar.html) and then extract it.
 
 ## Run the program
 ### Features extraction phase
 You can use the script that I have prepared:
 ```bash
 chmod +x ./scripts/run_extract_features.sh
-./scripts/run_extract_features.sh
+bash ./scripts/run_extract_features.sh <input_data_directory> <output_feature_directory>
 ```
 
 or to do it manually:
@@ -38,11 +37,23 @@ or to do it manually:
 cmake -S . -B build
 cmake --build build
 
-# To run the extrace features phase, use the following command
-# from the project root directory
-./build/extract_features
+./build/extract_features <input_data_directory> <output_feature_directory>
 ```
 
+Note: `<input_data_directory>` should contain these files to run normally:
+```
+data_batch_1.bin
+data_batch_2.bin
+data_batch_3.bin
+data_batch_4.bin
+data_batch_5.bin
+test_batch.bin
+```
+
+Example:
+```bash
+bash ./scripts/run_extract_features.sh ./data/cifar-10-binary/cifar-10-batches-bin ./output
+```
 
 ### Train SVM phase
 

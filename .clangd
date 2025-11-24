@@ -1,0 +1,8 @@
+CompileFlags:
+  Remove:
+    - "-forward-unknown-to-host-compiler"
+    - "--generate-code=arch=compute_61,code=[compute_61,sm_61]"
+    - "--generate-code=arch=compute_75,code=[compute_75,sm_75]"
+
+  Add:
+    - -I/home/naal/miniconda3/targets/x86_64-linux/include/
