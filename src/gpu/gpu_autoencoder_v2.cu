@@ -1,14 +1,29 @@
 // ============================================================================
 // GPU Autoencoder V2 - Optimized Implementation
+// Fixed: No curand dependency, using CPU-based Xavier initialization
 // ============================================================================
 
 #include "gpu/gpu_autoencoder_v2.h"
 #include "gpu/gpu_layers_v2.cuh"
 
 #include <cuda_runtime.h>
-#include <curand.h>
 #include <stdio.h>
 #include <cstring>
+#include <random>
+#include <cmath>
+
+// Xavier weight initialization on CPU (same as baseline)
+static void init_weights_xavier(float* weights, int in_channels, int out_channels, int kernel_size = 3) {
+    std::random_device rd;
+    std::mt19937 gen(42);  // Fixed seed for reproducibility
+    float limit = std::sqrt(6.0f / (in_channels + out_channels));
+    std::uniform_real_distribution<float> dis(-limit, limit);
+
+    int total_weights = out_channels * in_channels * kernel_size * kernel_size;
+    for (int i = 0; i < total_weights; i++) {
+        weights[i] = dis(gen);
+    }
+}
 
 // ============================================================================
 // CONSTRUCTOR & DESTRUCTOR
@@ -125,31 +140,40 @@ void GPUAutoencoderV2::allocate_gradients(int batch_size) {
 }
 
 void GPUAutoencoderV2::init_weights() {
-    curandGenerator_t gen;
-    curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
-    curandSetPseudoRandomGeneratorSeed(gen, 42);
-
-    float scale1 = sqrtf(2.0f / (INPUT_C * 3 * 3));
-    curandGenerateNormal(gen, d_w1, W1_SIZE, 0.0f, scale1);
+    // Allocate temporary host buffers
+    float* h_w1 = new float[W1_SIZE];
+    float* h_w2 = new float[W2_SIZE];
+    float* h_w3 = new float[W3_SIZE];
+    float* h_w4 = new float[W4_SIZE];
+    float* h_w5 = new float[W5_SIZE];
+    
+    // Initialize weights using Xavier on CPU
+    init_weights_xavier(h_w1, INPUT_C, CONV1_OUT);
+    init_weights_xavier(h_w2, CONV1_OUT, CONV2_OUT);
+    init_weights_xavier(h_w3, CONV2_OUT, CONV3_OUT);
+    init_weights_xavier(h_w4, CONV3_OUT, CONV4_OUT);
+    init_weights_xavier(h_w5, CONV4_OUT, CONV5_OUT);
+    
+    // Copy to device
+    cudaMemcpy(d_w1, h_w1, W1_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w2, h_w2, W2_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w3, h_w3, W3_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w4, h_w4, W4_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w5, h_w5, W5_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    
+    // Zero biases
     cudaMemset(d_b1, 0, B1_SIZE * sizeof(float));
-
-    float scale2 = sqrtf(2.0f / (CONV1_OUT * 3 * 3));
-    curandGenerateNormal(gen, d_w2, W2_SIZE, 0.0f, scale2);
     cudaMemset(d_b2, 0, B2_SIZE * sizeof(float));
-
-    float scale3 = sqrtf(2.0f / (CONV2_OUT * 3 * 3));
-    curandGenerateNormal(gen, d_w3, W3_SIZE, 0.0f, scale3);
     cudaMemset(d_b3, 0, B3_SIZE * sizeof(float));
-
-    float scale4 = sqrtf(2.0f / (CONV3_OUT * 3 * 3));
-    curandGenerateNormal(gen, d_w4, W4_SIZE, 0.0f, scale4);
     cudaMemset(d_b4, 0, B4_SIZE * sizeof(float));
-
-    float scale5 = sqrtf(2.0f / (CONV4_OUT * 3 * 3));
-    curandGenerateNormal(gen, d_w5, W5_SIZE, 0.0f, scale5);
     cudaMemset(d_b5, 0, B5_SIZE * sizeof(float));
-
-    curandDestroyGenerator(gen);
+    
+    // Free temporary buffers
+    delete[] h_w1;
+    delete[] h_w2;
+    delete[] h_w3;
+    delete[] h_w4;
+    delete[] h_w5;
 }
 
 void GPUAutoencoderV2::free_memory() {
