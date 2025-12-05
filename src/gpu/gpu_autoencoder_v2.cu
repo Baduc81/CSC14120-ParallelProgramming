@@ -26,7 +26,6 @@ GPUAutoencoderV2::GPUAutoencoderV2() : max_batch_size(0), current_batch_size(0) 
     d_grad_w1 = d_grad_b1 = d_grad_w2 = d_grad_b2 = nullptr;
     d_grad_w3 = d_grad_b3 = d_grad_w4 = d_grad_b4 = nullptr;
     d_grad_w5 = d_grad_b5 = nullptr;
-    d_input = d_target = nullptr;
     d_conv1_out = d_pool1_out = d_conv2_out = d_pool2_out = nullptr;
     d_conv3_out = d_up1_out = d_conv4_out = d_up2_out = d_conv5_out = nullptr;
     d_grad_conv5 = d_grad_up2 = d_grad_conv4 = d_grad_up1 = nullptr;
