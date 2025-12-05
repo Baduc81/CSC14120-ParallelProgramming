@@ -27,21 +27,16 @@ void train_gpu_autoencoder_v2(
     printf("Batch size: %d\n", config.batch_size);
     printf("Epochs: %d\n", config.epochs);
     printf("Learning rate: %.6f\n", config.learning_rate);
-    printf("Training samples: %d\n", dataset.train_size);
+    printf("Training samples: %zu\n", dataset.train_size());
     printf("========================================\n\n");
 
-    int num_batches = dataset.train_size / config.batch_size;
+    int num_batches = dataset.train_size() / config.batch_size;
     int input_size = 3 * 32 * 32;
     int batch_bytes = config.batch_size * input_size * sizeof(float);
 
-    // Allocate device memory for input batch
-    float* d_input;
-    float* d_output;
-    cudaMalloc(&d_input, batch_bytes);
-    cudaMalloc(&d_output, batch_bytes);
-
-    // Host buffer for batch
+    // Host buffers for batch (V2 API uses host pointers)
     float* h_batch = new float[config.batch_size * input_size];
+    float* h_output = new float[config.batch_size * input_size];
 
     auto total_start = std::chrono::high_resolution_clock::now();
 
@@ -54,25 +49,24 @@ void train_gpu_autoencoder_v2(
 
         for (int batch = 0; batch < num_batches; ++batch) {
             // Load batch data
+            const float* train_data = dataset.train_images().data();
             for (int i = 0; i < config.batch_size; ++i) {
                 int idx = batch * config.batch_size + i;
-                memcpy(h_batch + i * input_size,
-                       dataset.train_images + idx * input_size,
+            // Copy batch data (host to host)
+            memcpy(h_batch + i * input_size,
+                       train_data + idx * input_size,
                        input_size * sizeof(float));
             }
 
-            // Copy to device
-            cudaMemcpy(d_input, h_batch, batch_bytes, cudaMemcpyHostToDevice);
+            // Forward pass (V2 API with host pointers)
+            model.forward(h_batch, h_output, config.batch_size);
 
-            // Forward pass (using fused kernels)
-            model.forward(d_input, d_output, config.batch_size);
-
-            // Compute loss (using optimized kernel)
-            float batch_loss = model.compute_loss(d_output, d_input, config.batch_size);
+            // Compute loss (V2 API - autoencoder, target = input)
+            float batch_loss = model.compute_loss(h_output, h_batch, config.batch_size);
             epoch_loss += batch_loss;
 
-            // Backward pass
-            model.backward(d_input, d_input, config.batch_size);
+            // Backward pass (V2 API with host pointers)
+            model.backward(h_batch, h_batch, config.batch_size);
 
             // Update weights (using vectorized SGD)
             model.update_weights(config.learning_rate);
@@ -106,8 +100,7 @@ void train_gpu_autoencoder_v2(
 
     // Cleanup
     delete[] h_batch;
-    cudaFree(d_input);
-    cudaFree(d_output);
+    delete[] h_output;
 }
 
 // ============================================================================
@@ -127,46 +120,34 @@ void extract_and_save_features_gpu_v2(
     int feature_size = 128 * 8 * 8;  // 8192
 
     int batch_size = 64;
-    int input_bytes = batch_size * input_size * sizeof(float);
-    int feature_bytes = batch_size * feature_size * sizeof(float);
 
-    // Allocate device memory
-    float* d_input;
-    float* d_features;
-    cudaMalloc(&d_input, input_bytes);
-    cudaMalloc(&d_features, feature_bytes);
-
-    // Host buffers
+    // Host buffers only (V2 API uses host pointers)
     float* h_batch = new float[batch_size * input_size];
     float* h_features = new float[batch_size * feature_size];
 
     auto start = std::chrono::high_resolution_clock::now();
 
     // Extract training features
-    printf("Extracting training features (%d images)...\n", dataset.train_size);
+    int train_count = dataset.train_size();
+    printf("Extracting training features (%d images)...\n", train_count);
     
-    float* train_features = new float[dataset.train_size * feature_size];
-    int num_train_batches = (dataset.train_size + batch_size - 1) / batch_size;
+    float* train_features = new float[train_count * feature_size];
+    int num_train_batches = (train_count + batch_size - 1) / batch_size;
 
+    const float* train_data = dataset.train_images().data();
     for (int batch = 0; batch < num_train_batches; ++batch) {
         int start_idx = batch * batch_size;
-        int current_batch_size = std::min(batch_size, dataset.train_size - start_idx);
+        int current_batch_size = std::min(batch_size, train_count - start_idx);
 
         // Load batch
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(h_batch + i * input_size,
-                   dataset.train_images + (start_idx + i) * input_size,
+                   train_data + (start_idx + i) * input_size,
                    input_size * sizeof(float));
         }
 
-        cudaMemcpy(d_input, h_batch, current_batch_size * input_size * sizeof(float),
-                   cudaMemcpyHostToDevice);
-
-        // Extract features using optimized encoder
-        model.get_features(d_input, d_features, current_batch_size);
-
-        cudaMemcpy(h_features, d_features, current_batch_size * feature_size * sizeof(float),
-                   cudaMemcpyDeviceToHost);
+        // Extract features using optimized encoder (host API)
+        model.get_features(h_batch, h_features, current_batch_size);
 
         // Copy to output array
         for (int i = 0; i < current_batch_size; ++i) {
@@ -181,28 +162,25 @@ void extract_and_save_features_gpu_v2(
     }
 
     // Extract test features
-    printf("Extracting test features (%d images)...\n", dataset.test_size);
+    int test_count = dataset.test_size();
+    printf("Extracting test features (%d images)...\n", test_count);
     
-    float* test_features = new float[dataset.test_size * feature_size];
-    int num_test_batches = (dataset.test_size + batch_size - 1) / batch_size;
+    float* test_features = new float[test_count * feature_size];
+    int num_test_batches = (test_count + batch_size - 1) / batch_size;
 
+    const float* test_data = dataset.test_images().data();
     for (int batch = 0; batch < num_test_batches; ++batch) {
         int start_idx = batch * batch_size;
-        int current_batch_size = std::min(batch_size, dataset.test_size - start_idx);
+        int current_batch_size = std::min(batch_size, test_count - start_idx);
 
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(h_batch + i * input_size,
-                   dataset.test_images + (start_idx + i) * input_size,
+                   test_data + (start_idx + i) * input_size,
                    input_size * sizeof(float));
         }
 
-        cudaMemcpy(d_input, h_batch, current_batch_size * input_size * sizeof(float),
-                   cudaMemcpyHostToDevice);
-
-        model.get_features(d_input, d_features, current_batch_size);
-
-        cudaMemcpy(h_features, d_features, current_batch_size * feature_size * sizeof(float),
-                   cudaMemcpyDeviceToHost);
+        // Extract features (host API)
+        model.get_features(h_batch, h_features, current_batch_size);
 
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(test_features + (start_idx + i) * feature_size,
@@ -222,10 +200,11 @@ void extract_and_save_features_gpu_v2(
     std::string train_path = std::string(output_folder) + "/train_features_v2.txt";
     std::string test_path = std::string(output_folder) + "/test_features_v2.txt";
 
+    const uint8_t* train_labels = dataset.train_labels().data();
     FILE* f_train = fopen(train_path.c_str(), "w");
     if (f_train) {
-        for (int i = 0; i < dataset.train_size; ++i) {
-            fprintf(f_train, "%d", dataset.train_labels[i]);
+        for (int i = 0; i < train_count; ++i) {
+            fprintf(f_train, "%d", train_labels[i]);
             for (int j = 0; j < feature_size; ++j) {
                 float val = train_features[i * feature_size + j];
                 if (val != 0.0f) {
@@ -238,10 +217,11 @@ void extract_and_save_features_gpu_v2(
         printf("Saved training features to %s\n", train_path.c_str());
     }
 
+    const uint8_t* test_labels = dataset.test_labels().data();
     FILE* f_test = fopen(test_path.c_str(), "w");
     if (f_test) {
-        for (int i = 0; i < dataset.test_size; ++i) {
-            fprintf(f_test, "%d", dataset.test_labels[i]);
+        for (int i = 0; i < test_count; ++i) {
+            fprintf(f_test, "%d", test_labels[i]);
             for (int j = 0; j < feature_size; ++j) {
                 float val = test_features[i * feature_size + j];
                 if (val != 0.0f) {
@@ -258,11 +238,9 @@ void extract_and_save_features_gpu_v2(
     printf("Feature extraction V2 completed!\n");
     printf("========================================\n");
 
-    // Cleanup
+    // Cleanup (host buffers only - V2 manages device memory internally)
     delete[] h_batch;
     delete[] h_features;
     delete[] train_features;
     delete[] test_features;
-    cudaFree(d_input);
-    cudaFree(d_features);
 }
