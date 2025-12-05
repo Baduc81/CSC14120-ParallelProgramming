@@ -34,34 +34,61 @@ void upsample2d_forward_v2(
     int scale_factor
 );
 
-// Backward pass operations (OPTIMIZED kernels)
-void conv2d_relu_backward_fused_kernel(
-    const float* grad_output, const float* input, const float* weight,
-    const float* conv_output, float* grad_input,
-    int in_channels, int out_channels, int height, int width,
-    int kernel_size, int padding
+// Backward helpers (reuse baseline-style kernels with batch dimension)
+__global__ void mse_gradient_kernel_v2(
+    const float* __restrict__ output,
+    const float* __restrict__ target,
+    float* __restrict__ grad_output,
+    int total_size
 );
 
-void conv2d_weight_grad_optimized_kernel(
-    const float* input, const float* grad_output, float* grad_weight,
-    int in_channels, int out_channels, int height, int width,
-    int kernel_size, int padding
+void conv2d_backward_input_v2(
+    const float* d_input,
+    const float* d_weights,
+    const float* d_grad_output,
+    float* d_grad_input,
+    int batch_size,
+    int in_channels,
+    int out_channels,
+    int height,
+    int width
 );
 
-void bias_grad_optimized_kernel(
-    const float* grad_output, float* grad_bias,
-    int out_channels, int height, int width
+void conv2d_backward_full_v2(
+    const float* d_input,
+    const float* d_weights,
+    const float* d_conv_output,
+    const float* d_grad_output,
+    float* d_grad_input,
+    float* d_grad_weights,
+    float* d_grad_bias,
+    int batch_size,
+    int in_channels,
+    int out_channels,
+    int height,
+    int width
 );
 
-void maxpool2d_backward_optimized_kernel(
-    const float* grad_output, const float* input, const float* output, float* grad_input,
-    int channels, int in_height, int in_width, int out_height, int out_width,
-    int pool_size, int stride
+void maxpool2d_backward_v2(
+    const float* d_grad_output,
+    const float* d_input,
+    const float* d_output,
+    float* d_grad_input,
+    int batch_size,
+    int channels,
+    int in_height,
+    int in_width,
+    int pool_size,
+    int stride
 );
 
-void upsample2d_backward_optimized_kernel(
-    const float* grad_output, float* grad_input,
-    int channels, int in_height, int in_width, int out_height, int out_width,
+void upsample2d_backward_v2(
+    const float* d_grad_output,
+    float* d_grad_input,
+    int batch_size,
+    int channels,
+    int in_height,
+    int in_width,
     int scale_factor
 );
 
