@@ -40,7 +40,7 @@ __global__ void conv2d_bias_relu_fused_kernel(
     if (ow >= width || oh >= height || oc >= out_channels) return;
 
     float sum = 0.0f;
-    int half_k = kernel_size / 2;
+    (void)kernel_size;  // Suppress unused variable warning (unrolled to 3x3)
 
     // TECHNIQUE 2: Loop Unrolling for 3x3 kernel
     #pragma unroll
@@ -304,7 +304,7 @@ __global__ void conv2d_relu_backward_fused_kernel(
     if (iw >= width || ih >= height || ic >= in_channels) return;
 
     float sum = 0.0f;
-    int half_k = kernel_size / 2;
+    (void)kernel_size;  // Suppress unused variable warning (unrolled to 3x3)
 
     #pragma unroll
     for (int oc = 0; oc < out_channels; ++oc) {

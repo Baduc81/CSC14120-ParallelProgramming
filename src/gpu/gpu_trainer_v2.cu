@@ -32,7 +32,6 @@ void train_gpu_autoencoder_v2(
 
     int num_batches = dataset.train_size() / config.batch_size;
     int input_size = 3 * 32 * 32;
-    int batch_bytes = config.batch_size * input_size * sizeof(float);
 
     // Host buffers for batch (V2 API uses host pointers)
     float* h_batch = new float[config.batch_size * input_size];

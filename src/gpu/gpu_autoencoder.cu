@@ -485,16 +485,17 @@ void GPUAutoencoder::load_weights(const std::string& filepath) {
         allocate_host_memory();
     }
 
-    fread(h_w1, sizeof(float), W1_SIZE, f);
-    fread(h_b1, sizeof(float), B1_SIZE, f);
-    fread(h_w2, sizeof(float), W2_SIZE, f);
-    fread(h_b2, sizeof(float), B2_SIZE, f);
-    fread(h_w3, sizeof(float), W3_SIZE, f);
-    fread(h_b3, sizeof(float), B3_SIZE, f);
-    fread(h_w4, sizeof(float), W4_SIZE, f);
-    fread(h_b4, sizeof(float), B4_SIZE, f);
-    fread(h_w5, sizeof(float), W5_SIZE, f);
-    fread(h_b5, sizeof(float), B5_SIZE, f);
+    // Cast to void to suppress unused result warnings
+    (void)fread(h_w1, sizeof(float), W1_SIZE, f);
+    (void)fread(h_b1, sizeof(float), B1_SIZE, f);
+    (void)fread(h_w2, sizeof(float), W2_SIZE, f);
+    (void)fread(h_b2, sizeof(float), B2_SIZE, f);
+    (void)fread(h_w3, sizeof(float), W3_SIZE, f);
+    (void)fread(h_b3, sizeof(float), B3_SIZE, f);
+    (void)fread(h_w4, sizeof(float), W4_SIZE, f);
+    (void)fread(h_b4, sizeof(float), B4_SIZE, f);
+    (void)fread(h_w5, sizeof(float), W5_SIZE, f);
+    (void)fread(h_b5, sizeof(float), B5_SIZE, f);
 
     fclose(f);
 

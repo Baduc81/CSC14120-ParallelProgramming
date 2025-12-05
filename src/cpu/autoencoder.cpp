@@ -351,17 +351,17 @@ void Autoencoder::load_weights(const std::string& filepath) {
     FILE* f = fopen(filepath.c_str(), "rb");
     if (!f) return;
 
-    // Read weights and biases
-    fread(w1, sizeof(float), 256 * 3 * 3 * 3, f);
-    fread(b1, sizeof(float), 256, f);
-    fread(w2, sizeof(float), 128 * 256 * 3 * 3, f);
-    fread(b2, sizeof(float), 128, f);
-    fread(w3, sizeof(float), 128 * 128 * 3 * 3, f);
-    fread(b3, sizeof(float), 128, f);
-    fread(w4, sizeof(float), 256 * 128 * 3 * 3, f);
-    fread(b4, sizeof(float), 256, f);
-    fread(w5, sizeof(float), 3 * 256 * 3 * 3, f);
-    fread(b5, sizeof(float), 3, f);
+    // Read weights and biases (cast to void to suppress unused result warnings)
+    (void)fread(w1, sizeof(float), 256 * 3 * 3 * 3, f);
+    (void)fread(b1, sizeof(float), 256, f);
+    (void)fread(w2, sizeof(float), 128 * 256 * 3 * 3, f);
+    (void)fread(b2, sizeof(float), 128, f);
+    (void)fread(w3, sizeof(float), 128 * 128 * 3 * 3, f);
+    (void)fread(b3, sizeof(float), 128, f);
+    (void)fread(w4, sizeof(float), 256 * 128 * 3 * 3, f);
+    (void)fread(b4, sizeof(float), 256, f);
+    (void)fread(w5, sizeof(float), 3 * 256 * 3 * 3, f);
+    (void)fread(b5, sizeof(float), 3, f);
 
     fclose(f);
 }
