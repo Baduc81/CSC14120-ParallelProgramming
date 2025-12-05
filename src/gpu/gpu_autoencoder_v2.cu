@@ -1,22 +1,17 @@
 // ============================================================================
 // GPU Autoencoder V2 - Optimized Implementation
 // ============================================================================
-// Techniques:
-//   1. Kernel Fusion (Conv + Bias + ReLU)
-//   2. Loop Unrolling (3x3)
-//   3. Vectorized Memory (float4)
-// ============================================================================
 
 #include "gpu/gpu_autoencoder_v2.h"
 #include "gpu/gpu_layers_v2.cuh"
 
 #include <cuda_runtime.h>
+#include <curand.h>
 #include <stdio.h>
 #include <cstring>
-#include <random>
 
 // ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
+// CONSTRUCTOR & DESTRUCTOR
 // ============================================================================
 
 GPUAutoencoderV2::GPUAutoencoderV2() : max_batch_size(0), current_batch_size(0) {
@@ -35,7 +30,7 @@ GPUAutoencoderV2::GPUAutoencoderV2() : max_batch_size(0), current_batch_size(0) 
     init_weights();
     
     printf("[GPUAutoencoderV2] Initialized with %d parameters\n", TOTAL_PARAMS);
-    printf("[GPUAutoencoderV2] Optimizations: Kernel Fusion, Loop Unrolling, float4\n");
+    printf("[GPUAutoencoderV2] Optimizations: Kernel Fusion + Loop Unrolling + Tuned Blocks\n");
 }
 
 GPUAutoencoderV2::~GPUAutoencoderV2() {
@@ -43,11 +38,10 @@ GPUAutoencoderV2::~GPUAutoencoderV2() {
 }
 
 // ============================================================================
-// MEMORY MANAGEMENT
+// MEMORY ALLOCATION
 // ============================================================================
 
 void GPUAutoencoderV2::allocate_weights() {
-    // Allocate weight memory
     cudaMalloc(&d_w1, W1_SIZE * sizeof(float));
     cudaMalloc(&d_b1, B1_SIZE * sizeof(float));
     cudaMalloc(&d_w2, W2_SIZE * sizeof(float));
@@ -59,7 +53,6 @@ void GPUAutoencoderV2::allocate_weights() {
     cudaMalloc(&d_w5, W5_SIZE * sizeof(float));
     cudaMalloc(&d_b5, B5_SIZE * sizeof(float));
 
-    // Allocate gradient memory
     cudaMalloc(&d_grad_w1, W1_SIZE * sizeof(float));
     cudaMalloc(&d_grad_b1, B1_SIZE * sizeof(float));
     cudaMalloc(&d_grad_w2, W2_SIZE * sizeof(float));
@@ -73,10 +66,12 @@ void GPUAutoencoderV2::allocate_weights() {
 }
 
 void GPUAutoencoderV2::allocate_activations(int batch_size) {
-    if (batch_size <= max_batch_size) return;
+    if (batch_size <= max_batch_size && d_conv1_out != nullptr) {
+        return; // Already allocated for this batch size or larger
+    }
 
-    // Free old allocations if any
-    if (max_batch_size > 0) {
+    // Free old allocations if they exist
+    if (d_conv1_out) {
         cudaFree(d_conv1_out);
         cudaFree(d_pool1_out);
         cudaFree(d_conv2_out);
@@ -90,7 +85,6 @@ void GPUAutoencoderV2::allocate_activations(int batch_size) {
 
     max_batch_size = batch_size;
 
-    // Allocate activation buffers
     cudaMalloc(&d_conv1_out, batch_size * CONV1_OUT * CONV1_H * CONV1_W * sizeof(float));
     cudaMalloc(&d_pool1_out, batch_size * CONV1_OUT * POOL1_H * POOL1_W * sizeof(float));
     cudaMalloc(&d_conv2_out, batch_size * CONV2_OUT * CONV2_H * CONV2_W * sizeof(float));
@@ -103,7 +97,21 @@ void GPUAutoencoderV2::allocate_activations(int batch_size) {
 }
 
 void GPUAutoencoderV2::allocate_gradients(int batch_size) {
-    if (d_grad_conv5 != nullptr) return;  // Already allocated
+    if (d_grad_conv5 != nullptr) {
+        if (batch_size <= max_batch_size) {
+            return;
+        }
+        // Free old allocations
+        cudaFree(d_grad_conv5);
+        cudaFree(d_grad_up2);
+        cudaFree(d_grad_conv4);
+        cudaFree(d_grad_up1);
+        cudaFree(d_grad_conv3);
+        cudaFree(d_grad_pool2);
+        cudaFree(d_grad_conv2);
+        cudaFree(d_grad_pool1);
+        cudaFree(d_grad_conv1);
+    }
 
     cudaMalloc(&d_grad_conv5, batch_size * CONV5_OUT * CONV5_H * CONV5_W * sizeof(float));
     cudaMalloc(&d_grad_up2, batch_size * CONV4_OUT * UP2_H * UP2_W * sizeof(float));
@@ -117,77 +125,83 @@ void GPUAutoencoderV2::allocate_gradients(int batch_size) {
 }
 
 void GPUAutoencoderV2::init_weights() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    curandGenerator_t gen;
+    curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+    curandSetPseudoRandomGeneratorSeed(gen, 42);
 
-    auto init_layer = [&](float* d_w, float* d_b, int w_size, int b_size, int fan_in) {
-        float std_dev = sqrtf(2.0f / fan_in);  // He initialization
-        std::normal_distribution<float> dist(0.0f, std_dev);
+    float scale1 = sqrtf(2.0f / (INPUT_C * 3 * 3));
+    curandGenerateNormal(gen, d_w1, W1_SIZE, 0.0f, scale1);
+    cudaMemset(d_b1, 0, B1_SIZE * sizeof(float));
 
-        float* h_w = new float[w_size];
-        float* h_b = new float[b_size];
+    float scale2 = sqrtf(2.0f / (CONV1_OUT * 3 * 3));
+    curandGenerateNormal(gen, d_w2, W2_SIZE, 0.0f, scale2);
+    cudaMemset(d_b2, 0, B2_SIZE * sizeof(float));
 
-        for (int i = 0; i < w_size; ++i) h_w[i] = dist(gen);
-        for (int i = 0; i < b_size; ++i) h_b[i] = 0.0f;
+    float scale3 = sqrtf(2.0f / (CONV2_OUT * 3 * 3));
+    curandGenerateNormal(gen, d_w3, W3_SIZE, 0.0f, scale3);
+    cudaMemset(d_b3, 0, B3_SIZE * sizeof(float));
 
-        cudaMemcpy(d_w, h_w, w_size * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b, h_b, b_size * sizeof(float), cudaMemcpyHostToDevice);
+    float scale4 = sqrtf(2.0f / (CONV3_OUT * 3 * 3));
+    curandGenerateNormal(gen, d_w4, W4_SIZE, 0.0f, scale4);
+    cudaMemset(d_b4, 0, B4_SIZE * sizeof(float));
 
-        delete[] h_w;
-        delete[] h_b;
-    };
+    float scale5 = sqrtf(2.0f / (CONV4_OUT * 3 * 3));
+    curandGenerateNormal(gen, d_w5, W5_SIZE, 0.0f, scale5);
+    cudaMemset(d_b5, 0, B5_SIZE * sizeof(float));
 
-    init_layer(d_w1, d_b1, W1_SIZE, B1_SIZE, INPUT_C * 9);
-    init_layer(d_w2, d_b2, W2_SIZE, B2_SIZE, CONV1_OUT * 9);
-    init_layer(d_w3, d_b3, W3_SIZE, B3_SIZE, CONV2_OUT * 9);
-    init_layer(d_w4, d_b4, W4_SIZE, B4_SIZE, CONV3_OUT * 9);
-    init_layer(d_w5, d_b5, W5_SIZE, B5_SIZE, CONV4_OUT * 9);
+    curandDestroyGenerator(gen);
 }
 
 void GPUAutoencoderV2::free_memory() {
     // Free weights
-    cudaFree(d_w1); cudaFree(d_b1);
-    cudaFree(d_w2); cudaFree(d_b2);
-    cudaFree(d_w3); cudaFree(d_b3);
-    cudaFree(d_w4); cudaFree(d_b4);
-    cudaFree(d_w5); cudaFree(d_b5);
+    if (d_w1) cudaFree(d_w1);
+    if (d_b1) cudaFree(d_b1);
+    if (d_w2) cudaFree(d_w2);
+    if (d_b2) cudaFree(d_b2);
+    if (d_w3) cudaFree(d_w3);
+    if (d_b3) cudaFree(d_b3);
+    if (d_w4) cudaFree(d_w4);
+    if (d_b4) cudaFree(d_b4);
+    if (d_w5) cudaFree(d_w5);
+    if (d_b5) cudaFree(d_b5);
 
-    // Free weight gradients
-    cudaFree(d_grad_w1); cudaFree(d_grad_b1);
-    cudaFree(d_grad_w2); cudaFree(d_grad_b2);
-    cudaFree(d_grad_w3); cudaFree(d_grad_b3);
-    cudaFree(d_grad_w4); cudaFree(d_grad_b4);
-    cudaFree(d_grad_w5); cudaFree(d_grad_b5);
+    // Free gradients
+    if (d_grad_w1) cudaFree(d_grad_w1);
+    if (d_grad_b1) cudaFree(d_grad_b1);
+    if (d_grad_w2) cudaFree(d_grad_w2);
+    if (d_grad_b2) cudaFree(d_grad_b2);
+    if (d_grad_w3) cudaFree(d_grad_w3);
+    if (d_grad_b3) cudaFree(d_grad_b3);
+    if (d_grad_w4) cudaFree(d_grad_w4);
+    if (d_grad_b4) cudaFree(d_grad_b4);
+    if (d_grad_w5) cudaFree(d_grad_w5);
+    if (d_grad_b5) cudaFree(d_grad_b5);
 
     // Free activations
-    if (max_batch_size > 0) {
-        cudaFree(d_conv1_out);
-        cudaFree(d_pool1_out);
-        cudaFree(d_conv2_out);
-        cudaFree(d_pool2_out);
-        cudaFree(d_conv3_out);
-        cudaFree(d_up1_out);
-        cudaFree(d_conv4_out);
-        cudaFree(d_up2_out);
-        cudaFree(d_conv5_out);
-    }
+    if (d_conv1_out) cudaFree(d_conv1_out);
+    if (d_pool1_out) cudaFree(d_pool1_out);
+    if (d_conv2_out) cudaFree(d_conv2_out);
+    if (d_pool2_out) cudaFree(d_pool2_out);
+    if (d_conv3_out) cudaFree(d_conv3_out);
+    if (d_up1_out) cudaFree(d_up1_out);
+    if (d_conv4_out) cudaFree(d_conv4_out);
+    if (d_up2_out) cudaFree(d_up2_out);
+    if (d_conv5_out) cudaFree(d_conv5_out);
 
-    // Free activation gradients
-    if (d_grad_conv5 != nullptr) {
-        cudaFree(d_grad_conv5);
-        cudaFree(d_grad_up2);
-        cudaFree(d_grad_conv4);
-        cudaFree(d_grad_up1);
-        cudaFree(d_grad_conv3);
-        cudaFree(d_grad_pool2);
-        cudaFree(d_grad_conv2);
-        cudaFree(d_grad_pool1);
-        cudaFree(d_grad_conv1);
-    }
+    // Free gradient buffers
+    if (d_grad_conv5) cudaFree(d_grad_conv5);
+    if (d_grad_up2) cudaFree(d_grad_up2);
+    if (d_grad_conv4) cudaFree(d_grad_conv4);
+    if (d_grad_up1) cudaFree(d_grad_up1);
+    if (d_grad_conv3) cudaFree(d_grad_conv3);
+    if (d_grad_pool2) cudaFree(d_grad_pool2);
+    if (d_grad_conv2) cudaFree(d_grad_conv2);
+    if (d_grad_pool1) cudaFree(d_grad_pool1);
+    if (d_grad_conv1) cudaFree(d_grad_conv1);
 }
 
 // ============================================================================
-// FORWARD PASS - Using Fused Kernels
+// FORWARD PASS - Using Fused Kernels (Device API)
 // ============================================================================
 
 void GPUAutoencoderV2::forward(const float* d_input, float* d_output, int batch_size) {
@@ -251,12 +265,14 @@ void GPUAutoencoderV2::forward(const float* d_input, float* d_output, int batch_
         d_up2_out, d_w5, d_b5, d_output,
         batch_size, CONV4_OUT, CONV5_OUT, UP2_H, UP2_W, 3, 1, 1
     );
+    
+    // Store output for loss computation
+    if (d_output != d_conv5_out) {
+        cudaMemcpy(d_conv5_out, d_output,
+                   batch_size * CONV5_OUT * CONV5_H * CONV5_W * sizeof(float),
+                   cudaMemcpyDeviceToDevice);
+    }
 }
-
-
-// ============================================================================
-// GET FEATURES (Encoder only) - Host API
-// ============================================================================
 
 // ============================================================================
 // GET FEATURES - Extract latent representation (encoder only)
@@ -296,9 +312,8 @@ float GPUAutoencoderV2::compute_loss(const float* d_output, const float* d_targe
     return gpu_v2::mse_loss_v2(d_output, d_target, batch_size, CONV5_OUT, CONV5_H, CONV5_W);
 }
 
-
 // ============================================================================
-// BACKWARD PASS - Complete GPU implementation
+// BACKWARD PASS - Device API with Optimized Kernels
 // ============================================================================
 
 // MSE gradient kernel (replaces slow CPU lambda)
@@ -315,50 +330,45 @@ __global__ void mse_gradient_kernel_v2(
     }
 }
 
-// Conv backward data kernel (for layers without ReLU like Conv5)
 __global__ void conv2d_backward_data_v2(
     const float* __restrict__ grad_output,
-    const float* __restrict__ weights,
+    const float* __restrict__ weight,
     float* __restrict__ grad_input,
     int in_channels, int out_channels,
-    int height, int width,
+    int in_height, int in_width,
     int kernel_size, int padding
 ) {
-    int iw = blockIdx.x * blockDim.x + threadIdx.x;
-    int ih = blockIdx.y * blockDim.y + threadIdx.y;
-    int ic = blockIdx.z;
-
-    if (iw >= width || ih >= height || ic >= in_channels) return;
-
+    int w = blockIdx.x * blockDim.x + threadIdx.x;
+    int h = blockIdx.y * blockDim.y + threadIdx.y;
+    int c = blockIdx.z;
+    
+    if (w >= in_width || h >= in_height) return;
+    
+    int out_height = in_height;
+    int out_width = in_width;
+    
     float sum = 0.0f;
-
-    #pragma unroll
+    
     for (int oc = 0; oc < out_channels; ++oc) {
-        int weight_base = (oc * in_channels + ic) * kernel_size * kernel_size;
-        
-        #pragma unroll
-        for (int ky = 0; ky < 3; ++ky) {
-            #pragma unroll
-            for (int kx = 0; kx < 3; ++kx) {
-                int oh = ih + padding - ky;
-                int ow = iw + padding - kx;
+        for (int kh = 0; kh < kernel_size; ++kh) {
+            for (int kw = 0; kw < kernel_size; ++kw) {
+                int oh = h + padding - kh;
+                int ow = w + padding - kw;
                 
-                if (oh >= 0 && oh < height && ow >= 0 && ow < width) {
-                    int out_idx = oc * height * width + oh * width + ow;
-                    int flipped_ky = 2 - ky;
-                    int flipped_kx = 2 - kx;
-                    sum += grad_output[out_idx] * weights[weight_base + flipped_ky * 3 + flipped_kx];
+                if (oh >= 0 && oh < out_height && ow >= 0 && ow < out_width) {
+                    int grad_idx = oc * out_height * out_width + oh * out_width + ow;
+                    int weight_idx = oc * in_channels * kernel_size * kernel_size +
+                                    c * kernel_size * kernel_size +
+                                    kh * kernel_size + kw;
+                    sum += grad_output[grad_idx] * weight[weight_idx];
                 }
             }
         }
     }
-
-    grad_input[ic * height * width + ih * width + iw] = sum;
+    
+    int input_idx = c * in_height * in_width + h * in_width + w;
+    grad_input[input_idx] = sum;
 }
-
-// ============================================================================
-// BACKWARD PASS - Device API
-// ============================================================================
 
 void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int batch_size) {
     current_batch_size = batch_size;
@@ -380,9 +390,7 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
     int output_size = batch_size * CONV5_OUT * CONV5_H * CONV5_W;
     float scale = 2.0f / output_size;
 
-    // ========================================================================
-    // Step 1: Compute MSE gradient on GPU (FAST!)
-    // ========================================================================
+    // Compute MSE gradient on GPU
     dim3 block(256);
     dim3 grid((output_size + 255) / 256);
     mse_gradient_kernel_v2<<<grid, block>>>(d_conv5_out, d_target, d_grad_conv5, scale, output_size);
@@ -390,11 +398,8 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
     dim3 spatial_block(16, 16);
     dim3 wgrad_block(9);  // 3x3 kernel
 
-    // ========================================================================
-    // Step 2: Backward through Conv5 (no ReLU)
-    // ========================================================================
+    // Backward through Conv5 (no ReLU)
     for (int b = 0; b < batch_size; ++b) {
-        // Weight gradients
         dim3 wgrad_grid5(CONV4_OUT, CONV5_OUT);
         gpu_v2::conv2d_weight_grad_optimized_kernel<<<wgrad_grid5, wgrad_block>>>(
             d_up2_out + b * CONV4_OUT * UP2_H * UP2_W,
@@ -402,7 +407,6 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
             d_grad_w5, CONV4_OUT, CONV5_OUT, UP2_H, UP2_W, 3, 1
         );
         
-        // Data gradients → d_grad_up2
         dim3 data_grid5((UP2_W + 15) / 16, (UP2_H + 15) / 16, CONV4_OUT);
         conv2d_backward_data_v2<<<data_grid5, spatial_block>>>(
             d_grad_conv5 + b * CONV5_OUT * CONV5_H * CONV5_W,
@@ -414,9 +418,7 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
         d_grad_conv5, d_grad_b5, CONV5_OUT, CONV5_H * batch_size, CONV5_W
     );
 
-    // ========================================================================
-    // Step 3: Backward through Upsample2 (32x32 → 16x16)
-    // ========================================================================
+    // Backward through Upsample2
     for (int b = 0; b < batch_size; ++b) {
         dim3 up_grid2((CONV4_W + 15) / 16, (CONV4_H + 15) / 16, CONV4_OUT);
         gpu_v2::upsample2d_backward_optimized_kernel<<<up_grid2, spatial_block>>>(
@@ -426,11 +428,8 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
         );
     }
 
-    // ========================================================================
-    // Step 4: Backward through Conv4 + ReLU (FUSED)
-    // ========================================================================
+    // Backward through Conv4 + ReLU (FUSED)
     for (int b = 0; b < batch_size; ++b) {
-        // Data gradients (fused with ReLU) → d_grad_up1
         dim3 data_grid4((UP1_W + 15) / 16, (UP1_H + 15) / 16, CONV3_OUT);
         gpu_v2::conv2d_relu_backward_fused_kernel<<<data_grid4, spatial_block>>>(
             d_grad_conv4 + b * CONV4_OUT * CONV4_H * CONV4_W,
@@ -440,7 +439,6 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
             CONV3_OUT, CONV4_OUT, UP1_H, UP1_W, 3, 1
         );
         
-        // Weight gradients
         dim3 wgrad_grid4(CONV3_OUT, CONV4_OUT);
         gpu_v2::conv2d_weight_grad_optimized_kernel<<<wgrad_grid4, wgrad_block>>>(
             d_up1_out + b * CONV3_OUT * UP1_H * UP1_W,
@@ -452,9 +450,7 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
         d_grad_conv4, d_grad_b4, CONV4_OUT, CONV4_H * batch_size, CONV4_W
     );
 
-    // ========================================================================
-    // Step 5: Backward through Upsample1 (16x16 → 8x8)
-    // ========================================================================
+    // Backward through Upsample1
     for (int b = 0; b < batch_size; ++b) {
         dim3 up_grid1((CONV3_W + 15) / 16, (CONV3_H + 15) / 16, CONV3_OUT);
         gpu_v2::upsample2d_backward_optimized_kernel<<<up_grid1, spatial_block>>>(
@@ -464,9 +460,7 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
         );
     }
 
-    // ========================================================================
-    // Step 6: Backward through Conv3 + ReLU (FUSED)
-    // ========================================================================
+    // Backward through Conv3 + ReLU (FUSED)
     for (int b = 0; b < batch_size; ++b) {
         dim3 data_grid3((POOL2_W + 15) / 16, (POOL2_H + 15) / 16, CONV2_OUT);
         gpu_v2::conv2d_relu_backward_fused_kernel<<<data_grid3, spatial_block>>>(
@@ -488,9 +482,7 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
         d_grad_conv3, d_grad_b3, CONV3_OUT, CONV3_H * batch_size, CONV3_W
     );
 
-    // ========================================================================
-    // Step 7: Backward through MaxPool2 (16x16 → 8x8)
-    // ========================================================================
+    // Backward through MaxPool2
     for (int b = 0; b < batch_size; ++b) {
         dim3 pool_grid2((CONV2_W + 15) / 16, (CONV2_H + 15) / 16, CONV2_OUT);
         gpu_v2::maxpool2d_backward_optimized_kernel<<<pool_grid2, spatial_block>>>(
@@ -502,9 +494,7 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
         );
     }
 
-    // ========================================================================
-    // Step 8: Backward through Conv2 + ReLU (FUSED)
-    // ========================================================================
+    // Backward through Conv2 + ReLU (FUSED)
     for (int b = 0; b < batch_size; ++b) {
         dim3 data_grid2((POOL1_W + 15) / 16, (POOL1_H + 15) / 16, CONV1_OUT);
         gpu_v2::conv2d_relu_backward_fused_kernel<<<data_grid2, spatial_block>>>(
@@ -526,9 +516,7 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
         d_grad_conv2, d_grad_b2, CONV2_OUT, CONV2_H * batch_size, CONV2_W
     );
 
-    // ========================================================================
-    // Step 9: Backward through MaxPool1 (32x32 → 16x16)
-    // ========================================================================
+    // Backward through MaxPool1
     for (int b = 0; b < batch_size; ++b) {
         dim3 pool_grid1((CONV1_W + 15) / 16, (CONV1_H + 15) / 16, CONV1_OUT);
         gpu_v2::maxpool2d_backward_optimized_kernel<<<pool_grid1, spatial_block>>>(
@@ -540,9 +528,7 @@ void GPUAutoencoderV2::backward(const float* d_input, const float* d_target, int
         );
     }
 
-    // ========================================================================
-    // Step 10: Backward through Conv1 + ReLU (weights only, no input grad needed)
-    // ========================================================================
+    // Backward through Conv1 + ReLU (weights only)
     for (int b = 0; b < batch_size; ++b) {
         dim3 wgrad_grid1(INPUT_C, CONV1_OUT);
         gpu_v2::conv2d_weight_grad_optimized_kernel<<<wgrad_grid1, wgrad_block>>>(
@@ -576,102 +562,84 @@ void GPUAutoencoderV2::update_weights(float learning_rate) {
 }
 
 // ============================================================================
-// SAVE/LOAD WEIGHTS
+// WEIGHT PERSISTENCE
 // ============================================================================
 
-void GPUAutoencoderV2::save_weights(const std::string& filename) {
-    float* h_w1 = new float[W1_SIZE];
-    float* h_b1 = new float[B1_SIZE];
-    float* h_w2 = new float[W2_SIZE];
-    float* h_b2 = new float[B2_SIZE];
-    float* h_w3 = new float[W3_SIZE];
-    float* h_b3 = new float[B3_SIZE];
-    float* h_w4 = new float[W4_SIZE];
-    float* h_b4 = new float[B4_SIZE];
-    float* h_w5 = new float[W5_SIZE];
-    float* h_b5 = new float[B5_SIZE];
-
-    cudaMemcpy(h_w1, d_w1, W1_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_b1, d_b1, B1_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_w2, d_w2, W2_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_b2, d_b2, B2_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_w3, d_w3, W3_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_b3, d_b3, B3_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_w4, d_w4, W4_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_b4, d_b4, B4_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_w5, d_w5, W5_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_b5, d_b5, B5_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
-
-    FILE* f = fopen(filename.c_str(), "wb");
-    if (f) {
-        fwrite(h_w1, sizeof(float), W1_SIZE, f);
-        fwrite(h_b1, sizeof(float), B1_SIZE, f);
-        fwrite(h_w2, sizeof(float), W2_SIZE, f);
-        fwrite(h_b2, sizeof(float), B2_SIZE, f);
-        fwrite(h_w3, sizeof(float), W3_SIZE, f);
-        fwrite(h_b3, sizeof(float), B3_SIZE, f);
-        fwrite(h_w4, sizeof(float), W4_SIZE, f);
-        fwrite(h_b4, sizeof(float), B4_SIZE, f);
-        fwrite(h_w5, sizeof(float), W5_SIZE, f);
-        fwrite(h_b5, sizeof(float), B5_SIZE, f);
-        fclose(f);
-        printf("[GPUAutoencoderV2] Saved weights to %s\n", filename.c_str());
+void GPUAutoencoderV2::save_weights(const char* filename) {
+    FILE* f = fopen(filename, "wb");
+    if (!f) {
+        printf("Error: Cannot open file %s for writing\n", filename);
+        return;
     }
 
-    delete[] h_w1; delete[] h_b1;
-    delete[] h_w2; delete[] h_b2;
-    delete[] h_w3; delete[] h_b3;
-    delete[] h_w4; delete[] h_b4;
-    delete[] h_w5; delete[] h_b5;
+    float* h_temp = new float[W2_SIZE];  // Largest weight matrix
+
+    // Save all weights
+    cudaMemcpy(h_temp, d_w1, W1_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), W1_SIZE, f);
+    cudaMemcpy(h_temp, d_b1, B1_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), B1_SIZE, f);
+
+    cudaMemcpy(h_temp, d_w2, W2_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), W2_SIZE, f);
+    cudaMemcpy(h_temp, d_b2, B2_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), B2_SIZE, f);
+
+    cudaMemcpy(h_temp, d_w3, W3_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), W3_SIZE, f);
+    cudaMemcpy(h_temp, d_b3, B3_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), B3_SIZE, f);
+
+    cudaMemcpy(h_temp, d_w4, W4_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), W4_SIZE, f);
+    cudaMemcpy(h_temp, d_b4, B4_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), B4_SIZE, f);
+
+    cudaMemcpy(h_temp, d_w5, W5_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), W5_SIZE, f);
+    cudaMemcpy(h_temp, d_b5, B5_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    fwrite(h_temp, sizeof(float), B5_SIZE, f);
+
+    delete[] h_temp;
+    fclose(f);
+    printf("[GPUAutoencoderV2] Weights saved to %s\n", filename);
 }
 
-void GPUAutoencoderV2::load_weights(const std::string& filename) {
-    float* h_w1 = new float[W1_SIZE];
-    float* h_b1 = new float[B1_SIZE];
-    float* h_w2 = new float[W2_SIZE];
-    float* h_b2 = new float[B2_SIZE];
-    float* h_w3 = new float[W3_SIZE];
-    float* h_b3 = new float[B3_SIZE];
-    float* h_w4 = new float[W4_SIZE];
-    float* h_b4 = new float[B4_SIZE];
-    float* h_w5 = new float[W5_SIZE];
-    float* h_b5 = new float[B5_SIZE];
-
-    FILE* f = fopen(filename.c_str(), "rb");
-    if (f) {
-        size_t read_count = 0;
-        read_count += fread(h_w1, sizeof(float), W1_SIZE, f);
-        read_count += fread(h_b1, sizeof(float), B1_SIZE, f);
-        read_count += fread(h_w2, sizeof(float), W2_SIZE, f);
-        read_count += fread(h_b2, sizeof(float), B2_SIZE, f);
-        read_count += fread(h_w3, sizeof(float), W3_SIZE, f);
-        read_count += fread(h_b3, sizeof(float), B3_SIZE, f);
-        read_count += fread(h_w4, sizeof(float), W4_SIZE, f);
-        read_count += fread(h_b4, sizeof(float), B4_SIZE, f);
-        read_count += fread(h_w5, sizeof(float), W5_SIZE, f);
-        read_count += fread(h_b5, sizeof(float), B5_SIZE, f);
-        fclose(f);
-
-        cudaMemcpy(d_w1, h_w1, W1_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b1, h_b1, B1_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_w2, h_w2, W2_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b2, h_b2, B2_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_w3, h_w3, W3_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b3, h_b3, B3_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_w4, h_w4, W4_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b4, h_b4, B4_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_w5, h_w5, W5_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b5, h_b5, B5_SIZE * sizeof(float), cudaMemcpyHostToDevice);
-
-        printf("[GPUAutoencoderV2] Loaded weights from %s (%zu values)\n", 
-               filename.c_str(), read_count);
-    } else {
-        printf("[GPUAutoencoderV2] Failed to open %s\n", filename.c_str());
+void GPUAutoencoderV2::load_weights(const char* filename) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) {
+        printf("Error: Cannot open file %s for reading\n", filename);
+        return;
     }
 
-    delete[] h_w1; delete[] h_b1;
-    delete[] h_w2; delete[] h_b2;
-    delete[] h_w3; delete[] h_b3;
-    delete[] h_w4; delete[] h_b4;
-    delete[] h_w5; delete[] h_b5;
+    float* h_temp = new float[W2_SIZE];
+
+    fread(h_temp, sizeof(float), W1_SIZE, f);
+    cudaMemcpy(d_w1, h_temp, W1_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    fread(h_temp, sizeof(float), B1_SIZE, f);
+    cudaMemcpy(d_b1, h_temp, B1_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
+    fread(h_temp, sizeof(float), W2_SIZE, f);
+    cudaMemcpy(d_w2, h_temp, W2_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    fread(h_temp, sizeof(float), B2_SIZE, f);
+    cudaMemcpy(d_b2, h_temp, B2_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
+    fread(h_temp, sizeof(float), W3_SIZE, f);
+    cudaMemcpy(d_w3, h_temp, W3_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    fread(h_temp, sizeof(float), B3_SIZE, f);
+    cudaMemcpy(d_b3, h_temp, B3_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
+    fread(h_temp, sizeof(float), W4_SIZE, f);
+    cudaMemcpy(d_w4, h_temp, W4_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    fread(h_temp, sizeof(float), B4_SIZE, f);
+    cudaMemcpy(d_b4, h_temp, B4_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
+    fread(h_temp, sizeof(float), W5_SIZE, f);
+    cudaMemcpy(d_w5, h_temp, W5_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    fread(h_temp, sizeof(float), B5_SIZE, f);
+    cudaMemcpy(d_b5, h_temp, B5_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
+    delete[] h_temp;
+    fclose(f);
+    printf("[GPUAutoencoderV2] Weights loaded from %s\n", filename);
 }

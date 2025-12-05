@@ -23,7 +23,7 @@ void train_gpu_autoencoder_v2(
     printf("\n========================================\n");
     printf("GPU Autoencoder Training V2 (Optimized)\n");
     printf("========================================\n");
-    printf("Optimizations: Kernel Fusion, Loop Unrolling, float4\n");
+    printf("Optimizations: Kernel Fusion + Loop Unrolling + Tuned Blocks\n");
     printf("Batch size: %d\n", config.batch_size);
     printf("Epochs: %d\n", config.epochs);
     printf("Learning rate: %.6f\n", config.learning_rate);
@@ -34,10 +34,10 @@ void train_gpu_autoencoder_v2(
     int input_size = 3 * 32 * 32;
     int batch_bytes = config.batch_size * input_size * sizeof(float);
 
-    // Host buffers for batch
+    // Host buffer for batch
     float* h_batch = new float[config.batch_size * input_size];
     
-    // Device buffers for batch (Optimized: Allocate once, reuse)
+    // Device buffers (allocated once, reused - KEY OPTIMIZATION)
     float* d_input;
     float* d_output;
     cudaMalloc(&d_input, batch_bytes);
@@ -53,30 +53,29 @@ void train_gpu_autoencoder_v2(
         dataset.shuffle_train();
 
         for (int batch = 0; batch < num_batches; ++batch) {
-            // Load batch data
+            // Load batch data (host to host)
             const float* train_data = dataset.train_images().data();
             for (int i = 0; i < config.batch_size; ++i) {
                 int idx = batch * config.batch_size + i;
-                // Copy batch data (host to host)
                 memcpy(h_batch + i * input_size,
                        train_data + idx * input_size,
                        input_size * sizeof(float));
             }
             
-            // Copy batch to device ONCE per iteration
+            // OPTIMIZATION: Copy to device ONCE per batch
             cudaMemcpy(d_input, h_batch, batch_bytes, cudaMemcpyHostToDevice);
 
-            // Forward pass (Device API - computes activations and output)
+            // Forward pass (Device API - No extra copies!)
             model.forward(d_input, d_output, config.batch_size);
 
-            // Compute loss (Device API - No extra copies)
+            // Compute loss (Device API - No extra copies!)
             float batch_loss = model.compute_loss(d_output, d_input, config.batch_size);
             epoch_loss += batch_loss;
 
             // Backward pass (Device API - uses activations from forward)
             model.backward(d_input, d_input, config.batch_size);
 
-            // Update weights (using vectorized SGD)
+            // Update weights (vectorized SGD)
             model.update_weights(config.learning_rate);
 
             if (config.verbose && (batch + 1) % 100 == 0) {
@@ -100,23 +99,24 @@ void train_gpu_autoencoder_v2(
 
     printf("\n========================================\n");
     printf("Training completed in %ld seconds\n", total_duration);
-    printf("========================================\n");
+    printf("========================================\n\n");
 
-    // Save weights
-    std::string weights_path = std::string(output_folder) + "/autoencoder_weights_v2.bin";
-    model.save_weights(weights_path);
+    // Save trained model
+    char weights_file[512];
+    snprintf(weights_file, sizeof(weights_file), "%s/gpu_v2_weights.bin", output_folder);
+    model.save_weights(weights_file);
 
     // Cleanup
-    delete[] h_batch;
     cudaFree(d_input);
     cudaFree(d_output);
+    delete[] h_batch;
 }
 
 // ============================================================================
 // FEATURE EXTRACTION V2
 // ============================================================================
 
-void extract_and_save_features_gpu_v2(
+void extract_features_gpu_v2(
     GPUAutoencoderV2& model,
     CIFAR10Dataset& dataset,
     const char* output_folder
@@ -134,7 +134,7 @@ void extract_and_save_features_gpu_v2(
     float* h_batch = new float[batch_size * input_size];
     float* h_features = new float[batch_size * feature_size];
     
-    // Device buffers (allocated once, reused)
+    // Device buffers (allocated once, reused - KEY OPTIMIZATION)
     float* d_batch;
     float* d_features;
     cudaMalloc(&d_batch, batch_size * input_size * sizeof(float));
@@ -161,7 +161,7 @@ void extract_and_save_features_gpu_v2(
                    input_size * sizeof(float));
         }
 
-        // Copy to device
+        // OPTIMIZATION: Copy H2D once, compute on GPU, copy D2H once
         cudaMemcpy(d_batch, h_batch, current_batch_size * input_size * sizeof(float), cudaMemcpyHostToDevice);
         
         // Extract features using optimized encoder (device API)
@@ -170,15 +170,10 @@ void extract_and_save_features_gpu_v2(
         // Copy features back to host
         cudaMemcpy(h_features, d_features, current_batch_size * feature_size * sizeof(float), cudaMemcpyDeviceToHost);
 
-        // Copy to output array
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(train_features + (start_idx + i) * feature_size,
                    h_features + i * feature_size,
                    feature_size * sizeof(float));
-        }
-
-        if ((batch + 1) % 100 == 0) {
-            printf("  Processed %d/%d batches\n", batch + 1, num_train_batches);
         }
     }
 
@@ -200,7 +195,7 @@ void extract_and_save_features_gpu_v2(
                    input_size * sizeof(float));
         }
 
-        // Copy to device
+        // OPTIMIZATION: Copy H2D once, compute on GPU, copy D2H once
         cudaMemcpy(d_batch, h_batch, current_batch_size * input_size * sizeof(float), cudaMemcpyHostToDevice);
         
         // Extract features (device API)
@@ -215,63 +210,38 @@ void extract_and_save_features_gpu_v2(
                    feature_size * sizeof(float));
         }
     }
-    
-    // Free device buffers
-    cudaFree(d_batch);
-    cudaFree(d_features);
 
     auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end - start).count();
 
-    printf("Feature extraction completed in %.2f seconds\n", duration / 1000.0f);
+    printf("Feature extraction completed in %ld seconds\n", duration);
 
-    // Save features in LIBSVM format
-    printf("Saving features in LIBSVM format...\n");
+    // Save features
+    char train_file[512], test_file[512];
+    snprintf(train_file, sizeof(train_file), "%s/gpu_v2_train_features.bin", output_folder);
+    snprintf(test_file, sizeof(test_file), "%s/gpu_v2_test_features.bin", output_folder);
 
-    std::string train_path = std::string(output_folder) + "/train_features_v2.txt";
-    std::string test_path = std::string(output_folder) + "/test_features_v2.txt";
-
-    const uint8_t* train_labels = dataset.train_labels().data();
-    FILE* f_train = fopen(train_path.c_str(), "w");
+    FILE* f_train = fopen(train_file, "wb");
     if (f_train) {
-        for (int i = 0; i < train_count; ++i) {
-            fprintf(f_train, "%d", train_labels[i]);
-            for (int j = 0; j < feature_size; ++j) {
-                float val = train_features[i * feature_size + j];
-                if (val != 0.0f) {
-                    fprintf(f_train, " %d:%.6f", j + 1, val);
-                }
-            }
-            fprintf(f_train, "\n");
-        }
+        fwrite(train_features, sizeof(float), train_count * feature_size, f_train);
         fclose(f_train);
-        printf("Saved training features to %s\n", train_path.c_str());
+        printf("Saved training features to %s\n", train_file);
     }
 
-    const uint8_t* test_labels = dataset.test_labels().data();
-    FILE* f_test = fopen(test_path.c_str(), "w");
+    FILE* f_test = fopen(test_file, "wb");
     if (f_test) {
-        for (int i = 0; i < test_count; ++i) {
-            fprintf(f_test, "%d", test_labels[i]);
-            for (int j = 0; j < feature_size; ++j) {
-                float val = test_features[i * feature_size + j];
-                if (val != 0.0f) {
-                    fprintf(f_test, " %d:%.6f", j + 1, val);
-                }
-            }
-            fprintf(f_test, "\n");
-        }
+        fwrite(test_features, sizeof(float), test_count * feature_size, f_test);
         fclose(f_test);
-        printf("Saved test features to %s\n", test_path.c_str());
+        printf("Saved test features to %s\n", test_file);
     }
 
-    printf("\n========================================\n");
-    printf("Feature extraction V2 completed!\n");
-    printf("========================================\n");
-
-    // Cleanup (host buffers only - V2 manages device memory internally)
+    // Cleanup
+    cudaFree(d_batch);
+    cudaFree(d_features);
     delete[] h_batch;
     delete[] h_features;
     delete[] train_features;
     delete[] test_features;
+
+    printf("========================================\n\n");
 }
