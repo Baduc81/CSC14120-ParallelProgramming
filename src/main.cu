@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
         gpu_config_v2.verbose = true;
 
         train_gpu_autoencoder_v2(gpu_model_v2, dataset, gpu_config_v2, output_folder);
-        extract_and_save_features_gpu_v2(gpu_model_v2, dataset, output_folder);
+        extract_features_gpu_v2(gpu_model_v2, dataset, output_folder);
 
     } else if (mode == GPU_BASELINE) {
         // ================================================================
