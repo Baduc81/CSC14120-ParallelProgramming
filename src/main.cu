@@ -14,13 +14,19 @@
 #include "gpu/gpu_autoencoder.h"
 #include "gpu/gpu_trainer.h"
 
+// GPU2 implementation (optimized)
+#include "gpu2/gpu2_autoencoder.h"
+#include "gpu2/gpu2_trainer.h"
+
 void print_usage(const char* program_name) {
-    printf("Usage: %s <input_folder> <output_folder> [--cpu | --gpu]\n", program_name);
+    printf("Usage: %s <input_folder> <output_folder> [--cpu | --gpu | --gpu_v2]\n", program_name);
     printf("\nOptions:\n");
-    printf("  --cpu    Use CPU implementation (default)\n");
-    printf("  --gpu    Use GPU baseline implementation\n");
+    printf("  --cpu     Use CPU implementation (default)\n");
+    printf("  --gpu     Use GPU baseline implementation\n");
+    printf("  --gpu_v2  Use GPU optimized v2 (4 techniques: constant memory, pinned memory, multi-stream, memory coalescing)\n");
     printf("\nExample:\n");
-    printf("  %s ./data ./output --gpu\n", program_name);
+    printf("  %s ./data ./output --gpu     # GPU baseline\n", program_name);
+    printf("  %s ./data ./output --gpu_v2  # GPU v2 optimized\n", program_name);
 }
 
 int main(int argc, char** argv) {
@@ -35,12 +41,15 @@ int main(int argc, char** argv) {
     const char* output_folder = argv[2];
     
     // Parse mode argument
-    bool use_gpu = false;
+    // 0: CPU (default), 1: GPU Baseline, 2: GPU v2 Optimized
+    int mode = 0;
     if (argc >= 4) {
         if (strcmp(argv[3], "--gpu") == 0) {
-            use_gpu = true;
+            mode = 1;
+        } else if (strcmp(argv[3], "--gpu_v2") == 0) {
+            mode = 2;
         } else if (strcmp(argv[3], "--cpu") == 0) {
-            use_gpu = false;
+            mode = 0;
         } else {
             printf("Unknown option: %s\n", argv[3]);
             print_usage(argv[0]);
@@ -53,7 +62,8 @@ int main(int argc, char** argv) {
     printf("========================================\n");
     printf("Input folder: %s\n", input_folder);
     printf("Output folder: %s\n", output_folder);
-    printf("Mode: %s\n", use_gpu ? "GPU Baseline" : "CPU");
+    const char* mode_str = (mode == 0) ? "CPU" : (mode == 1) ? "GPU Baseline" : "GPU v2 Optimized";
+    printf("Mode: %s\n", mode_str);
     printf("========================================\n");
 
     // Load CIFAR-10 dataset
@@ -72,7 +82,7 @@ int main(int argc, char** argv) {
     }
     printf("Loaded %zu test images.\n", dataset.test_size());
 
-    if (use_gpu) {
+    if (mode == 1) {
         // ================================================================
         // GPU Baseline Implementation
         // ================================================================
@@ -89,6 +99,26 @@ int main(int argc, char** argv) {
 
         train_gpu_autoencoder(gpu_model, dataset, gpu_config, output_folder);
         extract_and_save_features_gpu(gpu_model, dataset, output_folder);
+
+    } else if (mode == 2) {
+        // ================================================================
+        // GPU v2 Optimized Implementation
+        // ================================================================
+        printf("\n>>> Using GPU v2 Optimized Implementation <<<\n");
+        printf(">>> Optimizations: Constant Memory + Pinned Memory + Multi-Stream Pipeline + Shared Memory Tiling + Memory Coalescing <<<\n");
+        
+        GPU2Autoencoder gpu2_model;
+        gpu2_model.initialize();
+
+        GPU2TrainConfig gpu2_config;
+        gpu2_config.batch_size = 64;
+        gpu2_config.epochs = 20;
+        gpu2_config.learning_rate = 0.001f;
+        gpu2_config.verbose = true;
+        gpu2_config.num_streams = 3;
+
+        train_gpu2_autoencoder(gpu2_model, dataset, gpu2_config, output_folder);
+        extract_and_save_features_gpu2(gpu2_model, dataset, output_folder);
 
     } else {
         // ================================================================
