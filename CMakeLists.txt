@@ -21,7 +21,7 @@ set(SOURCES ${COMMON_SOURCES} ${CPU_SOURCES} ${GPU_SOURCES} ${GPU2_SOURCES} ${MA
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Set CUDA architectures (Pascal=61, Turing=75, Ampere=86)
-set(CMAKE_CUDA_ARCHITECTURES 75 86)
+set(CMAKE_CUDA_ARCHITECTURES 61 75 86)
 
 # Create executable
 add_executable(extract_features ${SOURCES})
