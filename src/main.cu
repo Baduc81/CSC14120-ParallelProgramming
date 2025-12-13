@@ -14,19 +14,25 @@
 #include "gpu/gpu_autoencoder.h"
 #include "gpu/gpu_trainer.h"
 
-// GPU2 implementation (optimized)
+// GPU v1 implementation (Phase 3 v1 - constant memory)
+#include "gpu1/gpu1_autoencoder.h"
+#include "gpu1/gpu1_trainer.h"
+
+// GPU2 implementation (optimized v2)
 #include "gpu2/gpu2_autoencoder.h"
 #include "gpu2/gpu2_trainer.h"
 
 void print_usage(const char* program_name) {
-    printf("Usage: %s <input_folder> <output_folder> [--cpu | --gpu | --gpu_v2]\n", program_name);
+    printf("Usage: %s <input_folder> <output_folder> [--cpu | --gpu | --gpu_v1 | --gpu_v2]\n", program_name);
     printf("\nOptions:\n");
     printf("  --cpu     Use CPU implementation (default)\n");
-    printf("  --gpu     Use GPU baseline implementation\n");
-    printf("  --gpu_v2  Use GPU optimized v2 (4 techniques: constant memory, pinned memory, multi-stream, memory coalescing)\n");
+    printf("  --gpu     Use GPU baseline implementation (naive kernels)\n");
+    printf("  --gpu_v1  Use GPU v1 optimized (constant memory + optimized conv2d)\n");
+    printf("  --gpu_v2  Use GPU optimized v2 (constant memory + pinned memory + multi-stream)\n");
     printf("\nExample:\n");
-    printf("  %s ./data ./output --gpu     # GPU baseline\n", program_name);
-    printf("  %s ./data ./output --gpu_v2  # GPU v2 optimized\n", program_name);
+    printf("  %s ./data ./output --gpu      # GPU baseline\n", program_name);
+    printf("  %s ./data ./output --gpu_v1   # GPU v1 optimized\n", program_name);
+    printf("  %s ./data ./output --gpu_v2   # GPU v2 optimized\n", program_name);
 }
 
 int main(int argc, char** argv) {
@@ -41,13 +47,18 @@ int main(int argc, char** argv) {
     const char* output_folder = argv[2];
     
     // Parse mode argument
-    // 0: CPU (default), 1: GPU Baseline, 2: GPU v2 Optimized
+    // 0: CPU (default)
+    // 1: GPU Baseline
+    // 2: GPU v1 Optimized
+    // 3: GPU v2 Optimized
     int mode = 0;
     if (argc >= 4) {
         if (strcmp(argv[3], "--gpu") == 0) {
             mode = 1;
-        } else if (strcmp(argv[3], "--gpu_v2") == 0) {
+        } else if (strcmp(argv[3], "--gpu_v1") == 0) {
             mode = 2;
+        } else if (strcmp(argv[3], "--gpu_v2") == 0) {
+            mode = 3;
         } else if (strcmp(argv[3], "--cpu") == 0) {
             mode = 0;
         } else {
@@ -62,7 +73,12 @@ int main(int argc, char** argv) {
     printf("========================================\n");
     printf("Input folder: %s\n", input_folder);
     printf("Output folder: %s\n", output_folder);
-    const char* mode_str = (mode == 0) ? "CPU" : (mode == 1) ? "GPU Baseline" : "GPU v2 Optimized";
+    const char* mode_str = (mode == 0)
+                               ? "CPU"
+                               : (mode == 1)
+                                     ? "GPU Baseline"
+                                     : (mode == 2) ? "GPU v1 Optimized"
+                                                   : "GPU v2 Optimized";
     printf("Mode: %s\n", mode_str);
     printf("========================================\n");
 
@@ -102,10 +118,29 @@ int main(int argc, char** argv) {
 
     } else if (mode == 2) {
         // ================================================================
+        // GPU v1 Optimized Implementation
+        // ================================================================
+        printf("\n>>> Using GPU v1 Optimized Implementation <<<\n");
+        printf(">>> Optimizations: Kernel Fusion (Conv+ReLU) + Loop Unrolling + Pinned Memory <<<\n");
+
+        GPU1Autoencoder gpu1_model;
+        gpu1_model.initialize();
+
+        GPU1TrainConfig gpu1_config;
+        gpu1_config.batch_size = 64;
+        gpu1_config.epochs = 20;
+        gpu1_config.learning_rate = 0.001f;
+        gpu1_config.verbose = true;
+
+        train_gpu1_autoencoder(gpu1_model, dataset, gpu1_config, output_folder);
+        extract_and_save_features_gpu1(gpu1_model, dataset, output_folder);
+
+    } else if (mode == 3) {
+        // ================================================================
         // GPU v2 Optimized Implementation
         // ================================================================
         printf("\n>>> Using GPU v2 Optimized Implementation <<<\n");
-        printf(">>> Optimizations: Constant Memory + Pinned Memory + Multi-Stream Pipeline + Shared Memory Tiling + Memory Coalescing <<<\n");
+        printf(">>> Optimizations: Constant Memory + Pinned Memory + Multi-Stream Pipeline + Memory Coalescing <<<\n");
         
         GPU2Autoencoder gpu2_model;
         gpu2_model.initialize();
