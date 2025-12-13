@@ -311,7 +311,7 @@ void extract_and_save_features_gpu2(
         printf("Saved test features to: %s\n", test_path);
     }
 
-    // Save labels
+    // Save label
     FILE* f_train_labels = fopen(train_labels_path, "wb");
     if (f_train_labels) {
         fwrite(dataset.train_labels().data(), sizeof(uint8_t), dataset.train_size(), f_train_labels);
