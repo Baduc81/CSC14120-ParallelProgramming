@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <cstring>
+#include <climits>
+#include <cfloat>
 
 void train_gpu1_autoencoder(
     GPU1Autoencoder& model,
@@ -30,6 +32,7 @@ void train_gpu1_autoencoder(
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
+    float best_loss = FLT_MAX;
     auto total_start = std::chrono::high_resolution_clock::now();
 
     for (int epoch = 0; epoch < config.epochs; epoch++) {
@@ -42,6 +45,7 @@ void train_gpu1_autoencoder(
         float epoch_forward_time = 0.0f;
         float epoch_backward_time = 0.0f;
         float epoch_update_time = 0.0f;
+        float epoch_best_loss = FLT_MAX;
 
         for (size_t batch = 0; batch < num_batches; batch++) {
             auto batch_data = dataset.next_train_batch(config.batch_size);
@@ -57,6 +61,7 @@ void train_gpu1_autoencoder(
 
             float batch_loss = model.compute_loss(batch_images, config.batch_size);
             epoch_loss += batch_loss;
+            epoch_best_loss = (batch_loss < epoch_best_loss) ? batch_loss : epoch_best_loss;
 
             cudaEventRecord(start);
             model.backward(batch_images, batch_images, config.batch_size);
@@ -87,9 +92,16 @@ void train_gpu1_autoencoder(
         auto epoch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(epoch_end - epoch_start);
 
         float avg_loss = epoch_loss / num_batches;
-        printf("Epoch %d/%d Complete - Avg Loss: %.6f - Time: %ld ms (Forward: %.0f ms, Backward: %.0f ms, Update: %.0f ms)\n",
+        
+        // Update global best loss
+        if (epoch_best_loss < best_loss) {
+            best_loss = epoch_best_loss;
+        }
+        
+        printf("Epoch %d/%d Complete - Avg Loss: %.6f (Best: %.6f) - Time: %ld ms (Forward: %.0f ms, Backward: %.0f ms, Update: %.0f ms)\n",
                epoch + 1, config.epochs,
                avg_loss,
+               epoch_best_loss,
                epoch_duration.count(),
                epoch_forward_time, epoch_backward_time, epoch_update_time);
     }
@@ -99,7 +111,11 @@ void train_gpu1_autoencoder(
 
     printf("\n========================================\n");
     printf("GPU v1 Training Complete!\n");
-    printf("Total training time: %ld seconds\n", total_duration.count());
+    printf("========================================\n");
+    printf("Best Loss: %.6f\n", best_loss);
+    printf("Total Training Time: %ld seconds (%.1f min)\n", 
+           total_duration.count(),
+           total_duration.count() / 60.0f);
     printf("========================================\n");
 
     printf("\nSaving GPU1 model weights...\n");
