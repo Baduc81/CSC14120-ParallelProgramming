@@ -2,11 +2,13 @@
 
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <cfloat>
 
 #include <chrono>
 #include <cstring>
 #include <climits>
 #include <cfloat>
+#include "common/gpu_info.h"
 
 void train_gpu1_autoencoder(
     GPU1Autoencoder& model,
@@ -21,6 +23,11 @@ void train_gpu1_autoencoder(
     printf("Epochs: %d\n", config.epochs);
     printf("Learning rate: %.4f\n", config.learning_rate);
     printf("Training samples: %zu\n", dataset.train_size());
+    printf("========================================\n");
+    
+    // Memory before training
+    double gpu_mem_before = gpu_info::get_gpu_memory_used_gb();
+    printf("GPU Memory before training: %.3f GB\n", gpu_mem_before);
     printf("========================================\n\n");
 
     const size_t num_batches = dataset.train_size() / config.batch_size;
@@ -42,6 +49,7 @@ void train_gpu1_autoencoder(
         dataset.reset_cursor();
 
         float epoch_loss = 0.0f;
+        float best_loss = FLT_MAX;
         float epoch_forward_time = 0.0f;
         float epoch_backward_time = 0.0f;
         float epoch_update_time = 0.0f;
@@ -61,7 +69,9 @@ void train_gpu1_autoencoder(
 
             float batch_loss = model.compute_loss(batch_images, config.batch_size);
             epoch_loss += batch_loss;
-            epoch_best_loss = (batch_loss < epoch_best_loss) ? batch_loss : epoch_best_loss;
+            if (batch_loss < best_loss) {
+                best_loss = batch_loss;
+            }
 
             cudaEventRecord(start);
             model.backward(batch_images, batch_images, config.batch_size);
@@ -92,30 +102,25 @@ void train_gpu1_autoencoder(
         auto epoch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(epoch_end - epoch_start);
 
         float avg_loss = epoch_loss / num_batches;
-        
-        // Update global best loss
-        if (epoch_best_loss < best_loss) {
-            best_loss = epoch_best_loss;
-        }
-        
-        printf("Epoch %d/%d Complete - Avg Loss: %.6f (Best: %.6f) - Time: %ld ms (Forward: %.0f ms, Backward: %.0f ms, Update: %.0f ms)\n",
+        double gpu_mem_current = gpu_info::get_gpu_memory_used_gb();
+        printf("Epoch %d/%d Complete - Avg Loss: %.6f - Best Loss: %.6f - Time: %ld ms - GPU Mem: %.3f GB\n",
                epoch + 1, config.epochs,
-               avg_loss,
-               epoch_best_loss,
+               avg_loss, best_loss,
                epoch_duration.count(),
-               epoch_forward_time, epoch_backward_time, epoch_update_time);
+               gpu_mem_current);
     }
 
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_duration = std::chrono::duration_cast<std::chrono::seconds>(total_end - total_start);
 
+    double gpu_mem_after = gpu_info::get_gpu_memory_used_gb();
+    
     printf("\n========================================\n");
     printf("GPU v1 Training Complete!\n");
-    printf("========================================\n");
-    printf("Best Loss: %.6f\n", best_loss);
-    printf("Total Training Time: %ld seconds (%.1f min)\n", 
-           total_duration.count(),
-           total_duration.count() / 60.0f);
+    printf("Total training time: %ld seconds\n", total_duration.count());
+    printf("GPU Memory before training: %.3f GB\n", gpu_mem_before);
+    printf("GPU Memory after training: %.3f GB\n", gpu_mem_after);
+    printf("Peak GPU Memory used: %.3f GB\n", gpu_mem_after);
     printf("========================================\n");
 
     printf("\nSaving GPU1 model weights...\n");

@@ -39,3 +39,17 @@ void gpu_info::print() {
     );
     printf("7. Warp size: %d\n", prop.warpSize);
 }
+
+void gpu_info::print_memory_info() {
+    size_t free_mem, total_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    double used_mb = (double)(total_mem - free_mem) / (1 << 20);
+    double total_mb = (double)total_mem / (1 << 20);
+    printf("GPU Memory: %.2f / %.2f MB used\n", used_mb, total_mb);
+}
+
+double gpu_info::get_gpu_memory_used_gb() {
+    size_t free_mem, total_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    return (double)(total_mem - free_mem) / (1LL << 30);
+}
